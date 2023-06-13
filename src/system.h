@@ -24,8 +24,9 @@
 #ifndef _SYSTEM_H_
 #define _SYSTEM_H_
 
+#include <pan/pan.h>
 
-// ---------- Contants ---------- //
+// ---------- Constants ---------- //
 
 // The default name of the log file
 #ifdef WIN32
@@ -79,11 +80,15 @@ typedef int socket_t;
 // Listening socket
 typedef struct
 {
-	socket_t socket;
-	socklen_t local_addr_len;
-	const char* local_addr_name;
-	struct sockaddr_storage local_addr;
-	qboolean optional;
+	socket_t socket;                    // socket FD
+	socklen_t local_addr_len;           // length of local_addr
+	const char* local_addr_name;        // raw address from command line
+	struct sockaddr_storage local_addr; // local address socket is bound to
+	qboolean optional;                  // don't fail if listening on the socket fails
+	qboolean is_scion;                  // is a SCION listen connection, socket is a unix socket
+	const char* scion_local_addr;       // local UDP listen address for PAN conn
+	PanListenConn conn;                 // PAN connection
+	PanListenSockAdapter adapter;       // unix socket adapter
 } listen_socket_t;
 
 // The steps for running as a daemon (no console output)
@@ -112,6 +117,9 @@ extern daemon_state_t daemon_state;
 
 
 // ---------- Public functions (listening sockets) ---------- //
+
+// Close all network sockets
+void Sys_CloseAllSockets (void);
 
 // Step 1 - Add a listen socket to the listening socket list
 qboolean Sys_DeclareListenAddress (const char* local_addr_name);
@@ -147,8 +155,19 @@ qboolean Sys_SecureInit (void);
 // Returns a pointer to its static character buffer (do NOT free it!)
 const char* Sys_SockaddrToString (const struct sockaddr_storage* address, socklen_t socklen);
 
-// Get the network port from a sockaddr
-unsigned short Sys_GetSockaddrPort (const struct sockaddr_storage* address);
+// Returns a pointer to its static character buffer (do NOT free it!)
+const char* Sys_AddrToString (const address_t* address, addr_len_t socklen);
+
+// Get the network port from a sockaddr or SCION address
+unsigned short Sys_GetAddrPort (const address_t* address);
+
+// Receive a packet from a socket or a PAN connection
+ssize_t Sys_RecvFrom(const listen_socket_t* sock, void* restrict buf, size_t len,
+	address_t* restrict from, addr_len_t* restrict addr_len);
+
+// Send a packet to an IP/UDP or SCION/UDP endpoint
+ssize_t Sys_SendTo(const listen_socket_t* sock, const void* restrict buf, size_t len,
+	const address_t* restrict to, addr_len_t addr_len);
 
 // Get the last network error code
 int Sys_GetLastNetError (void);

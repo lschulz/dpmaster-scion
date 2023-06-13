@@ -49,6 +49,9 @@
 #	include <arpa/inet.h>
 #	include <netdb.h>
 #	include <sys/socket.h>
+#   include <sys/un.h>
+#   include <sys/eventfd.h>
+#   include <pan/pan.h>
 #endif
 
 
@@ -61,6 +64,8 @@
 // Maximum address hash size in bits
 #define MAX_HASH_SIZE 16
 
+// TODO
+#define SCION
 
 // ---------- Types ---------- //
 
@@ -105,11 +110,44 @@ typedef enum
 	CMDLINE_STATUS_NOT_ENOUGH_MEMORY,
 } cmdline_status_t;
 
+// SCION UDP address
+// All field except ip_family are in big-endian byte order
+typedef struct
+{
+	uint64_t ia;
+	uint32_t ip_family;
+	union
+	{
+		uint32_t ipv4;
+		uint32_t ipv6[4];
+	};
+	uint16_t port;
+} scion_addr_t;
+
+typedef enum
+{
+	ADDR_TYPE_IP,
+	ADDR_TYPE_SCION
+} addr_type_t;
+
+// Tagged union of socket and SCION addresses
+typedef struct
+{
+	addr_type_t type;
+	union
+	{
+		struct sockaddr_storage sock_addr;
+		scion_addr_t scion_addr;
+	};
+} address_t;
+
+typedef socklen_t addr_len_t;
+
 // User (client or server)
 typedef struct user_s
 {
-	struct sockaddr_storage address;
-	socklen_t addrlen;
+	address_t address;
+	addr_len_t addrlen;
 	struct user_s* next;
 	struct user_s** prev_ptr;
 } user_t;
@@ -137,6 +175,9 @@ extern qboolean print_date;
 
 // Are port numbers used when computing address hashes?
 extern qboolean hash_ports;
+
+// Set in signal handler when the server should exit
+extern volatile sig_atomic_t exit_event;
 
 
 // ---------- Public functions (user hash table) ---------- //
@@ -180,7 +221,10 @@ void Com_Printf (msg_level_t msg_level, const char* format, ...);
 void Com_SignalHandler (int Signal);
 
 // Compute the hash of a server address
-unsigned int Com_AddressHash (const struct sockaddr_storage* address, size_t hash_size);
+unsigned int Com_AddressHash (const address_t* address, size_t hash_size);
+
+// Compare 2 addresses and return "true" if they're equal
+qboolean Com_SameAddr (const address_t* addr1, const address_t* addr2, qboolean* same_public_address);
 
 // Compare 2 IPv4 addresses and return "true" if they're equal
 qboolean Com_SameIPv4Addr (const struct sockaddr_storage* addr1, const struct sockaddr_storage* addr2, qboolean* same_public_address);

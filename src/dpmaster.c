@@ -302,7 +302,7 @@ Print the
 static void PrintBanner (void)
 {
 	static qboolean banner_printed = false;
-	
+
 	if (! banner_printed)
 	{
 		Com_Printf (MSG_NORMAL,
@@ -325,7 +325,7 @@ Parse a system-independent command line option
 static cmdline_status_t Cmdline_Option (const cmdlineopt_t* opt, const char** params, unsigned int nb_params)
 {
 	const char* opt_name;
-	
+
 	opt_name = opt->long_name;
 
 	// Are servers on loopback interfaces allowed?
@@ -427,7 +427,7 @@ static cmdline_status_t Cmdline_Option (const cmdlineopt_t* opt, const char** pa
 	else if (strcmp (opt_name, "listen") == 0)
 	{
 		const char* param;
-		
+
 		param = params[0];
 		if (param[0] == '\0')
 			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
@@ -465,7 +465,7 @@ static cmdline_status_t Cmdline_Option (const cmdlineopt_t* opt, const char** pa
 		max_nb_clients = (unsigned int)strtol (start_ptr, &end_ptr, 0);
 		if (end_ptr == start_ptr || *end_ptr != '\0')
 			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
-		
+
 		if (! Cl_SetMaxNbClients (max_nb_clients))
 			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
 	}
@@ -481,7 +481,7 @@ static cmdline_status_t Cmdline_Option (const cmdlineopt_t* opt, const char** pa
 		max_nb_servers = (unsigned int)strtol (start_ptr, &end_ptr, 0);
 		if (end_ptr == start_ptr || *end_ptr != '\0')
 			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
-		
+
 		if (! Sv_SetMaxNbServers (max_nb_servers))
 			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
 	}
@@ -492,12 +492,12 @@ static cmdline_status_t Cmdline_Option (const cmdlineopt_t* opt, const char** pa
 		const char* start_ptr;
 		char* end_ptr;
 		unsigned int max_per_address;
-		
+
 		start_ptr = params[0];
 		max_per_address = (unsigned int)strtol (start_ptr, &end_ptr, 0);
 		if (end_ptr == start_ptr || *end_ptr != '\0')
 			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
-		
+
 		if (! Sv_SetMaxNbServersPerAddress (max_per_address))
 			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
 	}
@@ -508,7 +508,7 @@ static cmdline_status_t Cmdline_Option (const cmdlineopt_t* opt, const char** pa
 		const char* start_ptr;
 		char* end_ptr;
 		unsigned short port_num;
-		
+
 		start_ptr = params[0];
 		port_num = (unsigned short)strtol (start_ptr, &end_ptr, 0);
 		if (end_ptr == start_ptr || *end_ptr != '\0' || port_num == 0)
@@ -568,7 +568,7 @@ static void PrintCmdlineOptionHelp (const cmdlineopt_t* opt)
 			Com_Printf (MSG_ERROR, " %s", opt->help_syntax);
 		Com_Printf (MSG_ERROR, "\n");
 	}
-			
+
 	// Long name
 	Com_Printf (MSG_ERROR, " %c --%s",
 				has_short_name ? ' ' : '*', opt->long_name);
@@ -717,13 +717,13 @@ static cmdline_status_t ParseCommandLine (int argc, const char* argv [])
 						param_ind++;
 						nb_params++;
 					}
-					
+
 					// Don't we have too many parameters for this option?
 					if (nb_params <= cmdline_opt->max_params)
 					{
 						const char** opt_params;
 						qboolean free_opt_params = false;
-						
+
 						if (first_param != NULL)
 						{
 							if (nb_params > 1)
@@ -897,6 +897,21 @@ static qboolean SecureInit (void)
 	crt_time = time (NULL);
 	srand ((unsigned int)crt_time);
 
+	exit_event = eventfd(0, 0);
+	if (exit_event < 0)
+	{
+		Com_Printf (MSG_ERROR, "> ERROR: can't create eventfd object\n");
+		return false;
+	}
+
+	if (signal (SIGINT, Com_SignalHandler) == SIG_ERR)
+	{
+		Com_Printf (MSG_WARNING, "> WARNING: can't capture the SIGINT signal\n");
+	}
+	if (signal (SIGTERM, Com_SignalHandler) == SIG_ERR)
+	{
+		Com_Printf (MSG_WARNING, "> WARNING: can't capture the SIGTERM signal\n");
+	}
 #ifdef SIGUSR1
 	if (signal (SIGUSR1, Com_SignalHandler) == SIG_ERR)
 	{
@@ -914,7 +929,7 @@ static qboolean SecureInit (void)
 
 	if (! Sys_CreateListenSockets ())
 		return false;
-	
+
 	// If there no socket to listen to for whatever reason, there's simply nothing to do
 	if (nb_sockets <= 0)
 	{
@@ -931,6 +946,19 @@ static qboolean SecureInit (void)
 		return false;
 
 	return true;
+}
+
+
+/*
+====================
+Deinit
+
+Deinitialize fully initialized server before exiting
+====================
+*/
+static void Deinit (void)
+{
+	Sys_CloseAllSockets();
 }
 
 
@@ -966,7 +994,7 @@ int main (int argc, const char* argv [])
 			case CMDLINE_STATUS_SHOW_GAME_PROPERTIES:
 				Game_PrintProperties ();
 				break;
-			
+
 			default:
 				// Nothing
 				break;
@@ -992,19 +1020,21 @@ int main (int argc, const char* argv [])
 	for (;;)
 	{
 		fd_set sock_set;
-		socket_t max_sock;
+		int max_fd;
 		size_t sock_ind;
+		int nb_fd_ready;
 		int nb_sock_ready;
 
 		FD_ZERO(&sock_set);
-		max_sock = INVALID_SOCKET;
+		FD_SET(exit_event, &sock_set);
+		max_fd = exit_event;
 		for (sock_ind = 0; sock_ind < nb_sockets; sock_ind++)
 		{
 			socket_t crt_sock = listen_sockets[sock_ind].socket;
 
 			FD_SET(crt_sock, &sock_set);
-			if (max_sock == INVALID_SOCKET || max_sock < crt_sock)
-				max_sock = crt_sock;
+			if (max_fd < crt_sock)
+				max_fd = (int)crt_sock;
 		}
 
 		// Flush the console and log file
@@ -1013,7 +1043,7 @@ int main (int argc, const char* argv [])
 		if (daemon_state < DAEMON_STATE_EFFECTIVE)
 			fflush (stdout);
 
-		nb_sock_ready = select ((int)(max_sock + 1), &sock_set, NULL, NULL, NULL);
+		nb_fd_ready = select (max_fd + 1, &sock_set, NULL, NULL, NULL);
 
 		// Update the current time
 		crt_time = time (NULL);
@@ -1024,38 +1054,46 @@ int main (int argc, const char* argv [])
 		// Print the date once per select()
 		print_date = true;
 
-		if (nb_sock_ready <= 0)
+		if (nb_fd_ready <= 0)
 		{
 			if (Sys_GetLastNetError() != NETERR_INTR)
 				Com_Printf (MSG_WARNING,
 							"> WARNING: \"select\" returned %d\n",
-							nb_sock_ready);
+							nb_fd_ready);
 			continue;
 		}
+
+		// Should the server exit?
+		if (FD_ISSET (exit_event, &sock_set))
+		{
+			Com_Printf (MSG_NORMAL, "> Exiting\n");
+			Deinit();
+			return EXIT_SUCCESS;
+		}
+		nb_sock_ready = nb_fd_ready;
 
 		for (sock_ind = 0;
 			 sock_ind < nb_sockets && nb_sock_ready > 0;
 			 sock_ind++)
 		{
-			struct sockaddr_storage address;
-			socklen_t addrlen;
+			address_t address;
+			addr_len_t addrlen;
 			int nb_bytes;
 			char packet [MAX_PACKET_SIZE_IN + 1];  // "+ 1" because we append a '\0'
-			socket_t crt_sock = listen_sockets[sock_ind].socket;
+			listen_socket_t* sock = &listen_sockets[sock_ind];
 
-			if (! FD_ISSET (crt_sock, &sock_set))
+			if (! FD_ISSET (sock->socket, &sock_set))
 				continue;
 			nb_sock_ready--;
 
 			// Get the next valid message
-			addrlen = sizeof (address);
-			nb_bytes = recvfrom (crt_sock, packet, sizeof (packet) - 1, 0,
-								 (struct sockaddr*)&address, &addrlen);
+			addrlen = sizeof (address.sock_addr);
+			nb_bytes = Sys_RecvFrom (sock, packet, sizeof (packet) - 1, &address, &addrlen);
 
 			if (nb_bytes <= 0)
 			{
 				Com_Printf (MSG_WARNING,
-							"> WARNING: \"recvfrom\" returned %d\n", nb_bytes);
+							"> WARNING: \"Sys_RecvFrom\" returned %d\n", nb_bytes);
 				continue;
 			}
 
@@ -1063,8 +1101,7 @@ int main (int argc, const char* argv [])
 			if (max_msg_level > MSG_NOPRINT &&
 				(Com_IsLogEnabled() || daemon_state < DAEMON_STATE_EFFECTIVE))
 			{
-				strncpy (peer_address, Sys_SockaddrToString(&address, addrlen),
-						 sizeof (peer_address));
+				strncpy (peer_address, Sys_AddrToString(&address, addrlen), sizeof (peer_address));
 				peer_address[sizeof (peer_address) - 1] = '\0';
 			}
 
@@ -1077,14 +1114,17 @@ int main (int argc, const char* argv [])
 			}
 
 			// A few sanity checks
-			if (address.ss_family != AF_INET && address.ss_family != AF_INET6)
+			if (address.type != ADDR_TYPE_SCION)
 			{
-				Com_Printf (MSG_WARNING,
-							"> WARNING: rejected packet from %s (invalid address family: %hd)\n",
-							peer_address, address.ss_family);
-				continue;
+				if (address.sock_addr.ss_family != AF_INET && address.sock_addr.ss_family != AF_INET6)
+				{
+					Com_Printf (MSG_WARNING,
+								"> WARNING: rejected packet from %s (invalid address family: %hd)\n",
+								peer_address, address.sock_addr.ss_family);
+					continue;
+				}
 			}
-			if (Sys_GetSockaddrPort(&address) == 0)
+			if (Sys_GetAddrPort(&address) == 0)
 			{
 				Com_Printf (MSG_WARNING,
 							"> WARNING: rejected packet from %s (source port = 0)\n",
@@ -1110,7 +1150,7 @@ int main (int argc, const char* argv [])
 			packet[nb_bytes] = '\0';
 
 			// Call HandleMessage with the remaining contents
-			HandleMessage (packet + 4, nb_bytes - 4, &address, addrlen, crt_sock);
+			HandleMessage (packet + 4, nb_bytes - 4, &address, addrlen, sock);
 		}
 	}
 }

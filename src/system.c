@@ -37,6 +37,9 @@
 
 #endif
 
+#define MAX_UNIX_SOCK_ADDR_LEN 32
+#define UNIX_SOCK_LOC_TEMPLATE "/tmp/dpmaster_%d_loc_%d.sock"
+#define UNIX_SOCK_PAN_TEMPLATE "/tmp/dpmaster_%d_pan_%d.sock"
 
 // ---------- Private variables ---------- //
 
@@ -133,27 +136,6 @@ static void Sys_CloseSocket (socket_t sock)
 
 /*
 ====================
-Sys_CloseAllSockets
-
-Close all network sockets
-====================
-*/
-static void Sys_CloseAllSockets (void)
-{
-	size_t sock_ind;
-	for (sock_ind = 0; sock_ind < nb_sockets; sock_ind++)
-	{
-		listen_socket_t* sock = &listen_sockets[sock_ind];
-
-		if (sock->socket != -1)
-			Sys_CloseSocket (sock->socket);
-	}
-	nb_sockets = 0;
-}
-
-
-/*
-====================
 Sys_BuildSockaddr
 
 Build a sockaddr
@@ -187,7 +169,7 @@ static qboolean Sys_BuildSockaddr (const char* addr_name, const char* port_name,
 	{
 		Com_Printf (MSG_ERROR, "> ERROR: can't resolve %s:%s (%s)\n",
 					addr_name, port_name, gai_strerror (err));
-		
+
 		if (addrinf != NULL)
 			freeaddrinfo (addrinf);
 		return false;
@@ -196,8 +178,33 @@ static qboolean Sys_BuildSockaddr (const char* addr_name, const char* port_name,
 	assert(addrinf->ai_addrlen <= sizeof (*sock_address));
 	*sock_address_len = (socklen_t)addrinf->ai_addrlen;
 	memcpy (sock_address, addrinf->ai_addr, addrinf->ai_addrlen);
-	
+
 	freeaddrinfo (addrinf);
+	return true;
+}
+
+
+/*
+====================
+Sys_BuildUnixSockaddr
+
+Build a sockaddr for a unix domain socket
+====================
+*/
+static qboolean Sys_BuildUnixSockaddr(const char* addr_name,
+									  struct sockaddr_storage* sock_address,
+									  socklen_t* sock_address_len)
+{
+	size_t len = strlen (addr_name) + 1;
+	struct sockaddr_un* unix_sock = (struct sockaddr_un*)sock_address;
+
+	if (sizeof(unix_sock->sun_path) < len)
+		return false;
+
+	unix_sock->sun_family = AF_UNIX;
+	memcpy (unix_sock->sun_path, addr_name, len);
+	*sock_address_len = sizeof(struct sockaddr_un);
+
 	return true;
 }
 
@@ -295,7 +302,293 @@ static qboolean Sys_StringToSockaddr (const char* address,
 }
 
 
+/*
+====================
+Sys_SetAddrMasterPort
+
+Add master_port to IPv4/6 address if it does not have a port already.
+Returns false if the address could not be parsed at all. A return value of true
+does not guaranteed the address is valid.
+====================
+*/
+qboolean Sys_SetAddrMasterPort(const char* restrict addr_in,
+							   char* restrict addr_out,
+							   size_t addr_out_len)
+{
+	assert (addr_in != NULL);
+	if (addr_in[0] == '[')
+	{
+		// bracketed IPv6 address
+		const char* end_bracket = strchr(&addr_in[1], ']');
+		if (end_bracket == NULL)
+			return false; // not a valid address
+
+		if (end_bracket[1] == '\0')
+		{
+			// assume bracketed IPv6 address without port
+			snprintf(addr_out, addr_out_len, "%s:%d", addr_in, master_port);
+			return true;
+		}
+		else if (end_bracket[1] == ':')
+        {
+            snprintf(addr_out, addr_out_len, "%s", addr_in);
+			return true; // assume bracketed IPv6 address with port
+        }
+		else
+			return false; // not a valid address
+	}
+	else
+	{
+		const char* first_colon = strchr(addr_in, ':');
+		if (first_colon == NULL)
+		{
+			// assume IPv4 address without port
+			snprintf(addr_out, addr_out_len, "%s:%d", addr_in, master_port);
+            return true;
+		}
+		else
+		{
+			const char* last_colon = strrchr(&first_colon[1], ':');
+			if (last_colon != NULL)
+            {
+                // assume IPv6 address without port
+                snprintf(addr_out, addr_out_len, "[%s]:%d", addr_in, master_port);
+                return true;
+            }
+            else
+            {
+                snprintf(addr_out, addr_out_len, "%s", addr_in);
+				return true; // assume IPv4 address with port
+            }
+		}
+	}
+}
+
+
+/*
+====================
+Sys_CreateIpListenSocket
+
+Create regular IP listening socket
+====================
+*/
+static qboolean Sys_CreateIpListenSocket (listen_socket_t* listen_sock,
+										  unsigned int* sock_ind)
+{
+	socket_t crt_sock;
+	int addr_family;
+
+	addr_family = listen_sock->local_addr.ss_family;
+	crt_sock = socket (addr_family, SOCK_DGRAM, IPPROTO_UDP);
+	if (crt_sock == INVALID_SOCKET)
+	{
+		// If the address family isn't supported but the socket is optional, don't fail!
+		if (Sys_GetLastNetError() == NETERR_AFNOSUPPORT &&
+			listen_sock->optional)
+		{
+			Com_Printf (MSG_WARNING, "> WARNING: protocol %s isn't supported\n",
+						(addr_family == AF_INET) ? "IPv4" :
+						((addr_family == AF_INET6) ? "IPv6" : "UNKNOWN"));
+
+			if (*sock_ind + 1 < nb_sockets)
+				memmove (&listen_sockets[*sock_ind], &listen_sockets[*sock_ind + 1],
+							(nb_sockets - *sock_ind - 2) * sizeof (listen_sockets[0]));
+
+			(*sock_ind)--;
+			nb_sockets--;
+			return true;
+		}
+
+		Com_Printf (MSG_ERROR, "> ERROR: socket creation failed (%s)\n",
+					Sys_GetLastNetErrorString ());
+		return false;
+	}
+
+	if (addr_family == AF_INET6)
+	{
+// Win32's API only supports it since Windows Vista, but fortunately
+// the default value is what we want on Win32 anyway (IPV6_V6ONLY = true)
+#ifdef IPV6_V6ONLY
+		int ipv6_only = 1;
+		if (setsockopt (crt_sock, IPPROTO_IPV6, IPV6_V6ONLY,
+						(const void *)&ipv6_only, sizeof(ipv6_only)) != 0)
+		{
+#ifdef WIN32
+			// This flag isn't supported before Windows Vista
+			if (Sys_GetLastNetError() != NETERR_NOPROTOOPT)
+#endif
+			{
+				Com_Printf (MSG_ERROR, "> ERROR: setsockopt(IPV6_V6ONLY) failed (%s)\n",
+							Sys_GetLastNetErrorString ());
+				return false;
+			}
+		}
+#endif
+	}
+
+	if (listen_sock->local_addr_name != NULL)
+	{
+		const char* addr_str;
+
+		addr_str = Sys_SockaddrToString(&listen_sock->local_addr,
+										listen_sock->local_addr_len);
+		Com_Printf (MSG_NORMAL, "> Listening on address %s (%s)\n",
+					listen_sock->local_addr_name,
+					addr_str);
+	}
+	else
+		Com_Printf (MSG_NORMAL, "> Listening on all %s addresses\n",
+					addr_family == AF_INET6 ? "IPv6" : "IPv4");
+
+	if (bind (crt_sock, (struct sockaddr*)&listen_sock->local_addr,
+				listen_sock->local_addr_len) != 0)
+	{
+		Com_Printf (MSG_ERROR, "> ERROR: socket binding failed (%s)\n",
+					Sys_GetLastNetErrorString ());
+		return false;
+	}
+
+	listen_sock->socket = crt_sock;
+	return true;
+}
+
+
+/*
+====================
+Sys_CreateScionListenSocket
+
+Create SCION listening connection and a proxy socket
+====================
+*/
+static qboolean Sys_CreateScionListenSocket (listen_socket_t* listen_sock,
+											 unsigned int* sock_ind)
+{
+	PanError err = PAN_ERR_OK;
+	char local_addr[128] = {0};
+	char unix_addr[MAX_UNIX_SOCK_ADDR_LEN] = {0};
+
+	if (listen_sock->scion_local_addr == NULL)
+	{
+		// Since binding to wildcard addresses is not supported in SCION at the
+		// moment, this will bind to a default local IP (most likely localhost).
+		snprintf(local_addr, sizeof(local_addr), "0.0.0.0:%d", master_port);
+	}
+	else
+	{
+		if (! Sys_SetAddrMasterPort (listen_sock->scion_local_addr, local_addr, sizeof(local_addr)))
+		{
+			Com_Printf (MSG_ERROR, "> ERROR: invalid address %s\n", listen_sock->scion_local_addr);
+			return false;
+		}
+	}
+
+	// Create listen connection
+	err = PanListenUDP (local_addr, PAN_INVALID_HANDLE, &listen_sock->conn);
+	if (err != PAN_ERR_OK)
+	{
+		if (err == PAN_ERR_ADDR_SYNTAX)
+			Com_Printf (MSG_ERROR, "> ERROR: invalid address %s\n", local_addr);
+		else if (err == PAN_ERR_FAILED)
+			Com_Printf (MSG_ERROR, "> ERROR: PAN socket binding to %s failed\n", local_addr);
+		return false;
+	}
+	else
+	{
+		char* addr = NULL;
+		PanUDPAddr pan_addr = PanListenConnLocalAddr (listen_sock->conn);
+		addr = PanUDPAddrToString (pan_addr);
+		PanDeleteHandle(pan_addr);
+		if (! addr) return false;
+		Com_Printf (MSG_NORMAL, "> Listening on address %s\n",
+					addr);
+		free(addr);
+	}
+
+	// Create PAN end of unix socket pair
+	snprintf(unix_addr, sizeof(unix_addr), UNIX_SOCK_PAN_TEMPLATE, getpid(), *sock_ind);
+	err = PanNewListenSockAdapter (listen_sock->conn,
+									unix_addr,
+									((struct sockaddr_un*)&listen_sock->local_addr)->sun_path,
+									&listen_sock->adapter);
+	if (err != PAN_ERR_OK)
+	{
+		Com_Printf (MSG_ERROR, "> ERROR: unix socket binding to %s failed\n",
+					unix_addr);
+		return false;
+	}
+
+	// Create local end of unix socket pair
+	listen_sock->socket = socket (AF_UNIX, SOCK_DGRAM, 0);
+	if (listen_sock->socket == INVALID_SOCKET)
+	{
+		Com_Printf (MSG_ERROR, "> ERROR: unix socket creation failed (%s)\n",
+					Sys_GetLastNetErrorString ());
+		return false;
+	}
+
+	unlink(((struct sockaddr_un*)&listen_sock->local_addr)->sun_path);
+	if (bind (listen_sock->socket, (struct sockaddr*)&listen_sock->local_addr,
+			  listen_sock->local_addr_len) != 0)
+	{
+		Com_Printf (MSG_ERROR, "> ERROR: unix socket binding to %s failed (%s)\n",
+					((struct sockaddr_un*)&listen_sock->local_addr)->sun_path,
+					Sys_GetLastNetErrorString ());
+		return false;
+	}
+
+	// Connect our socket to the Go socket so we can use plain send()
+	struct sockaddr_un remote;
+	remote.sun_family = AF_UNIX;
+	strncpy (remote.sun_path, unix_addr, sizeof(remote.sun_path) - 1);
+	remote.sun_path[sizeof(remote.sun_path) - 1] = '\0';
+	if (connect (listen_sock->socket, (struct sockaddr*)&remote, sizeof(remote)))
+	{
+		Com_Printf (MSG_ERROR, "> ERROR: connection to %s failed (%s)\n",
+					unix_addr,
+					Sys_GetLastNetErrorString ());
+		return false;
+	}
+
+	return true;
+}
+
 // ---------- Public functions (listening sockets) ---------- //
+
+/*
+====================
+Sys_CloseAllSockets
+
+Close all network sockets
+====================
+*/
+void Sys_CloseAllSockets (void)
+{
+	size_t sock_ind;
+	for (sock_ind = 0; sock_ind < nb_sockets; sock_ind++)
+	{
+		listen_socket_t* sock = &listen_sockets[sock_ind];
+
+		if (sock->socket != -1)
+		{
+			Sys_CloseSocket (sock->socket);
+			unlink(((struct sockaddr_un*)&sock->local_addr)->sun_path);
+		}
+		if (sock->adapter != PAN_INVALID_HANDLE)
+		{
+			PanListenSockAdapterClose(sock->adapter);
+			PanDeleteHandle(sock->adapter);
+			sock->adapter = PAN_INVALID_HANDLE;
+		}
+		if (sock->conn != PAN_INVALID_HANDLE)
+		{
+			PanListenConnClose(sock->conn);
+			PanDeleteHandle(sock->conn);
+			sock->conn = PAN_INVALID_HANDLE;
+		}
+	}
+	nb_sockets = 0;
+}
+
 
 /*
 ====================
@@ -313,6 +606,14 @@ qboolean Sys_DeclareListenAddress (const char* local_addr_name)
 		memset (listen_sock, 0, sizeof (*listen_sock));
 		listen_sock->socket = INVALID_SOCKET;
 		listen_sock->local_addr_name = local_addr_name;
+
+		// Check if the address looks like a SCION address (ISD-ASN,IP)
+		const char* comma = strchr (local_addr_name, ',');
+		if (comma && comma[1] != '\0')
+		{
+			listen_sock->is_scion = true;
+			listen_sock->local_addr_name = &comma[1];
+		}
 
 		nb_sockets++;
 		return true;
@@ -335,6 +636,8 @@ Step 2 - Resolve the address names of all the listening sockets
 */
 qboolean Sys_ResolveListenAddresses (void)
 {
+	char local_addr[MAX_UNIX_SOCK_ADDR_LEN] = {0};
+
 	// If nothing to resolve, add the local IPv4 & IPv6 addresses
 	if (nb_sockets == 0)
 	{
@@ -354,6 +657,17 @@ qboolean Sys_ResolveListenAddresses (void)
 			listen_sockets[addr_ind].optional = true;
 			nb_sockets++;
 		}
+
+		// SCION socket that will bind to "default" IP
+		listen_sockets[nb_sockets].is_scion = true;
+
+		snprintf(local_addr, sizeof(local_addr), UNIX_SOCK_LOC_TEMPLATE, getpid(), nb_sockets);
+		if (! Sys_BuildUnixSockaddr (local_addr,
+									&listen_sockets[nb_sockets].local_addr,
+									&listen_sockets[nb_sockets].local_addr_len))
+			return false;
+
+		nb_sockets++;
 	}
 	else
 	{
@@ -363,10 +677,21 @@ qboolean Sys_ResolveListenAddresses (void)
 		{
 			listen_socket_t* listen_sock = &listen_sockets[sock_ind];
 
-			if (! Sys_StringToSockaddr (listen_sock->local_addr_name,
-										&listen_sock->local_addr,
-										&listen_sock->local_addr_len))
-				return false;
+			if (! listen_sock->is_scion)
+			{
+				if (! Sys_StringToSockaddr (listen_sock->local_addr_name,
+											&listen_sock->local_addr,
+											&listen_sock->local_addr_len))
+					return false;
+			}
+			else
+			{
+				snprintf(local_addr, sizeof(local_addr), UNIX_SOCK_LOC_TEMPLATE, getpid(), sock_ind);
+				if (! Sys_BuildUnixSockaddr (local_addr,
+											 &listen_sock->local_addr,
+											 &listen_sock->local_addr_len))
+					return false;
+			}
 		}
 	}
 
@@ -383,90 +708,25 @@ Step 3 - Create the listening sockets
 */
 qboolean Sys_CreateListenSockets (void)
 {
-	unsigned int sock_ind;
-
-	for (sock_ind = 0; sock_ind < nb_sockets; sock_ind++)
+	for (unsigned int sock_ind = 0; sock_ind < nb_sockets; sock_ind++)
 	{
 		listen_socket_t* listen_sock = &listen_sockets[sock_ind];
-		socket_t crt_sock;
-		int addr_family;
-
-		addr_family = listen_sock->local_addr.ss_family;
-		crt_sock = socket (addr_family, SOCK_DGRAM, IPPROTO_UDP);
-		if (crt_sock == INVALID_SOCKET)
+		if (! listen_sock->is_scion)
 		{
-			// If the address family isn't supported but the socket is optional, don't fail!
-			if (Sys_GetLastNetError() == NETERR_AFNOSUPPORT &&
-				listen_sock->optional)
+			if (! Sys_CreateIpListenSocket (listen_sock, &sock_ind))
 			{
-				Com_Printf (MSG_WARNING, "> WARNING: protocol %s isn't supported\n",
-							(addr_family == AF_INET) ? "IPv4" :
-							((addr_family == AF_INET6) ? "IPv6" : "UNKNOWN"));
-
-				if (sock_ind + 1 < nb_sockets)
-					memmove (&listen_sockets[sock_ind], &listen_sockets[sock_ind + 1],
-							 (nb_sockets - sock_ind - 2) * sizeof (listen_sockets[0]));
-
-				sock_ind--;
-				nb_sockets--;
-				continue;
+				Sys_CloseAllSockets ();
+				return false;
 			}
-
-			Com_Printf (MSG_ERROR, "> ERROR: socket creation failed (%s)\n",
-						Sys_GetLastNetErrorString ());
-			Sys_CloseAllSockets ();
-			return false;
-		}
-
-		if (addr_family == AF_INET6)
-		{
-// Win32's API only supports it since Windows Vista, but fortunately
-// the default value is what we want on Win32 anyway (IPV6_V6ONLY = true)
-#ifdef IPV6_V6ONLY
-			int ipv6_only = 1;
-			if (setsockopt (crt_sock, IPPROTO_IPV6, IPV6_V6ONLY,
-							(const void *)&ipv6_only, sizeof(ipv6_only)) != 0)
-			{
-#ifdef WIN32
-				// This flag isn't supported before Windows Vista
-				if (Sys_GetLastNetError() != NETERR_NOPROTOOPT)
-#endif
-				{
-					Com_Printf (MSG_ERROR, "> ERROR: setsockopt(IPV6_V6ONLY) failed (%s)\n",
-								Sys_GetLastNetErrorString ());
-
-					Sys_CloseAllSockets ();
-					return false;
-				}
-			}
-#endif
-		}
-
-		if (listen_sock->local_addr_name != NULL)
-		{
-			const char* addr_str;
-
-			addr_str = Sys_SockaddrToString(&listen_sock->local_addr,
-											listen_sock->local_addr_len);
-			Com_Printf (MSG_NORMAL, "> Listening on address %s (%s)\n",
-						listen_sock->local_addr_name,
-						addr_str);
 		}
 		else
-			Com_Printf (MSG_NORMAL, "> Listening on all %s addresses\n",
-						addr_family == AF_INET6 ? "IPv6" : "IPv4");
-
-		if (bind (crt_sock, (struct sockaddr*)&listen_sock->local_addr,
-				  listen_sock->local_addr_len) != 0)
 		{
-			Com_Printf (MSG_ERROR, "> ERROR: socket binding failed (%s)\n",
-						Sys_GetLastNetErrorString ());
-
-			Sys_CloseAllSockets ();
-			return false;
+			if (! Sys_CreateScionListenSocket (listen_sock, &sock_ind))
+			{
+				Sys_CloseAllSockets ();
+				return false;
+			}
 		}
-
-		listen_sock->socket = crt_sock;
 	}
 
 	return true;
@@ -487,7 +747,7 @@ cmdline_status_t Sys_Cmdline_Option (const cmdlineopt_t* opt, const char** param
 #ifndef WIN32
 
 	const char* opt_name;
-	
+
 	opt_name = opt->long_name;
 
 	// Daemon mode
@@ -621,7 +881,7 @@ qboolean Sys_SecureInit (void)
 		{
 			Com_Printf (MSG_ERROR, "> ERROR: daemonization failed (%s)\n",
 						strerror (errno));
-			
+
 			daemon_state = DAEMON_STATE_NO;
 			return false;
 		}
@@ -631,7 +891,7 @@ qboolean Sys_SecureInit (void)
 		dup2 (null_device, STDIN_FILENO);
 		dup2 (null_device, STDOUT_FILENO);
 		dup2 (null_device, STDERR_FILENO);
-		
+
 		// We no longer need to keep this file descriptor open
 		close (null_device);
 		null_device = -1;
@@ -684,8 +944,64 @@ const char* Sys_SockaddrToString (const struct sockaddr_storage* address, sockle
 		strncpy(result, "NON-PRINTABLE ADDRESS", sizeof (result) - 1);
 	}
 	result[sizeof(result) - 1] = '\0';
-   
+
 	return result;
+}
+
+
+/*
+====================
+Sys_AddrToString
+
+Returns a pointer to its static character buffer (do NOT free it!)
+====================
+*/
+const char* Sys_AddrToString (const address_t* address, addr_len_t socklen)
+{
+	static char result [128];
+
+	if (address->type == ADDR_TYPE_IP)
+	{
+		return Sys_SockaddrToString(&address->sock_addr, socklen);
+	}
+	else
+	{
+		assert (address->type == ADDR_TYPE_SCION);
+		ssize_t offset = 0;
+		ssize_t len = sizeof(result);
+
+		uint64_t ia = address->scion_addr.ia;
+		int ret = snprintf (result, len, "%hu-%hx:%hx:%hx,",
+							ntohs(ia & 0xffff),
+							ntohs((ia >> 16) & 0xffff),
+							ntohs((ia >> 32) & 0xffff),
+							ntohs((ia >> 48) & 0xffff));
+		if (ret > 0) offset += ret;
+
+		if (address->scion_addr.ip_family == AF_INET)
+		{
+			const unsigned char* ip = (const unsigned char*)&address->scion_addr.ipv4;
+			ret = snprintf (result + offset, len - offset, "%hhu.%hhu.%hhu.%hhu",
+							ip[0], ip[1], ip[2], ip[3]);
+			if (ret > 0) offset += ret;
+		}
+		else
+		{
+			assert (address->scion_addr.ip_family == AF_INET6);
+			const unsigned char* ip = (const unsigned char*)&address->scion_addr.ipv6;
+			ret = snprintf (result + offset, len - offset,
+							"[%04hx:%04hx:%04hx:%04hx:%04hx:%04hx:%04hx:%04hx]",
+							ntohs(*(uint16_t*)&ip[ 0]), ntohs(*(uint16_t*)&ip[ 2]),
+							ntohs(*(uint16_t*)&ip[ 4]), ntohs(*(uint16_t*)&ip[ 6]),
+							ntohs(*(uint16_t*)&ip[ 8]), ntohs(*(uint16_t*)&ip[10]),
+							ntohs(*(uint16_t*)&ip[12]), ntohs(*(uint16_t*)&ip[14]));
+			if (ret > 0) offset += ret;
+		}
+
+		snprintf (result + offset, len - offset, ":%hu", address->scion_addr.port);
+
+		return result;
+	}
 }
 
 
@@ -696,23 +1012,138 @@ Sys_GetSockaddrPort
 Get the network port from a sockaddr
 ====================
 */
-unsigned short Sys_GetSockaddrPort (const struct sockaddr_storage* address)
+unsigned short Sys_GetAddrPort (const address_t* address)
 {
-	if (address->ss_family == AF_INET6)
+	if (address->type == ADDR_TYPE_SCION)
 	{
+		return ntohs((unsigned short)address->scion_addr.port);
+	}
+	else if (address->sock_addr.ss_family == AF_INET6)
+	{
+		assert (address->type == ADDR_TYPE_IP);
+
 		const struct sockaddr_in6* addr_v6;
 
-		addr_v6 = (const struct sockaddr_in6*)address;
+		addr_v6 = (const struct sockaddr_in6*)&address->sock_addr;
 		return ntohs (addr_v6->sin6_port);
 	}
 	else
 	{
+		assert (address->type == ADDR_TYPE_IP);
+
 		const struct sockaddr_in* addr_v4;
 
-		assert (address->ss_family == AF_INET);
-		addr_v4 = (const struct sockaddr_in*)address;
+		assert (address->sock_addr.ss_family == AF_INET);
+		addr_v4 = (const struct sockaddr_in*)&address->sock_addr;
 		return ntohs (addr_v4->sin_port);
 	}
+}
+
+
+/*
+====================
+Sys_RecvFrom
+
+Receive a packet from a socket or a PAN connection
+====================
+*/
+ssize_t Sys_RecvFrom(const listen_socket_t *sock, void *restrict buf, size_t len,
+					 address_t *restrict from, addr_len_t *restrict addr_len)
+{
+	if (! sock->is_scion)
+	{
+		from->type = ADDR_TYPE_IP;
+		return recvfrom (sock->socket, buf, len, 0, (struct sockaddr*)&from->sock_addr, addr_len);
+	}
+
+	// Receive SCION packet
+	if (len > 2048) len = 2048;
+	char packet [PAN_ADDR_HDR_SIZE + len];
+
+	ssize_t bytes = recv (sock->socket, packet, sizeof(packet), 0);
+	if (bytes < PAN_ADDR_HDR_SIZE)
+	{
+		if (bytes >= 0)
+		{
+			Com_Printf (MSG_WARNING,
+						"> WARNING: Received invalid header from PAN unix socket\n");
+		}
+		return bytes;
+	}
+
+	memcpy (buf, packet + PAN_ADDR_HDR_SIZE, bytes - PAN_ADDR_HDR_SIZE);
+
+	// Parse proxy header
+	from->type = ADDR_TYPE_SCION;
+	from->scion_addr.ia = *(uint64_t*)packet;
+	uint32_t addrLen = *(uint32_t*)&packet[8];
+	if (addrLen == 4)
+	{
+		from->scion_addr.ip_family = AF_INET;
+		from->scion_addr.ipv4 = *(uint32_t*)&packet[12];
+	}
+	else if (addrLen == 16)
+	{
+		from->scion_addr.ip_family = AF_INET6;
+		for (size_t i = 0; i < 4; ++i)
+			from->scion_addr.ipv6[i] = *(uint32_t*)&packet[12 + 4*i];
+	}
+	else
+	{
+		Com_Printf (MSG_WARNING,
+					"> WARNING: Received invalid header from PAN unix socket\n");
+		return -1;
+	}
+	from->scion_addr.port = *(uint16_t*)&packet[28];
+
+	return bytes - PAN_ADDR_HDR_SIZE;
+}
+
+
+/*
+====================
+Sys_SendTo
+
+Send a packet to an IP/UDP or SCION/UDP endpoint
+====================
+*/
+ssize_t Sys_SendTo(const listen_socket_t *sock, const void *restrict buf, size_t len,
+				   const address_t *restrict to, addr_len_t addr_len)
+{
+	if (! sock->is_scion)
+	{
+		assert (to->type == ADDR_TYPE_IP);
+		return sendto (sock->socket, buf, len, 0, (struct sockaddr*)&to->sock_addr, addr_len);
+	}
+
+	// Send SCION packet
+	if (len > 2048) len = 2048;
+	char packet [PAN_ADDR_HDR_SIZE + len];
+
+	// Write proxy header
+	assert (to->type == ADDR_TYPE_SCION);
+	*(uint64_t*)packet = to->scion_addr.ia;
+	if (to->scion_addr.ip_family == AF_INET)
+	{
+		*(uint32_t*)&packet[8] = 4;
+		*(uint32_t*)&packet[12] = to->scion_addr.ipv4;
+	}
+	else
+	{
+		assert (to->scion_addr.ip_family == AF_INET6);
+		*(uint32_t*)&packet[8] = 16;
+		for (size_t i = 0; i < 4; ++i)
+			*(uint32_t*)&packet[12 + 4*i] = to->scion_addr.ipv6[i];
+	}
+	*(uint16_t*)&packet[28] = to->scion_addr.port;
+
+	memcpy (packet + PAN_ADDR_HDR_SIZE, buf, len);
+
+	ssize_t bytes = send (sock->socket, packet, PAN_ADDR_HDR_SIZE + len, 0);
+	if (bytes < PAN_ADDR_HDR_SIZE)
+		return -1;
+
+    return bytes;
 }
 
 

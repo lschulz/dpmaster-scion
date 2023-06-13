@@ -105,7 +105,7 @@ qboolean Sv_Init (void);
 
 // Search for a particular server in the list; add it if necessary
 // NOTE: doesn't change the current position for "Sv_GetNext"
-server_t* Sv_GetByAddr (const struct sockaddr_storage* address, socklen_t addrlen, qboolean add_it);
+server_t* Sv_GetByAddr (const address_t* address, addr_len_t addrlen, qboolean add_it);
 
 // Get the first server in the list
 server_t* Sv_GetFirst (void);

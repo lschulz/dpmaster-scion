@@ -94,7 +94,7 @@ static void Sv_Remove (server_t* sv)
 		{
 			last_used_slot--;
 		} while (last_used_slot >= 0 && servers[last_used_slot].state == sv_state_unused_slot);
-	
+
 	// If we have removed the end of the server iteration, set it to the new end of the list
 	if (last_server_ind > last_used_slot)
 		last_server_ind = last_used_slot;
@@ -106,7 +106,7 @@ static void Sv_Remove (server_t* sv)
 	nb_servers--;
 	Com_Printf (MSG_NORMAL,
 				"> %s timed out; %u server(s) currently registered\n",
-				Sys_SockaddrToString(&sv->user.address, sv->user.addrlen), nb_servers);
+				Sys_AddrToString(&sv->user.address, sv->user.addrlen), nb_servers);
 
 	assert (last_used_slot >= (int)nb_servers - 1);
 }
@@ -123,13 +123,13 @@ Test if the server has timed out and remove it if it's the case.
 static qboolean Sv_IsActive (unsigned int sv_ind)
 {
 	server_t* sv = &servers[sv_ind];
-	
+
 	assert (sv_ind < max_nb_servers);
 
 	// If the entry isn't even used
 	if (sv->state == sv_state_unused_slot)
 		return false;
-	
+
 	assert (sv->gamename[0] != '\0' || sv->state == sv_state_uninitialized);
 
 	// If the server has timed out
@@ -150,19 +150,10 @@ Sv_GetByAddr_Internal
 Search for a particular server in the list
 ====================
 */
-static server_t* Sv_GetByAddr_Internal (const struct sockaddr_storage* address, unsigned int* same_address_found)
+static server_t* Sv_GetByAddr_Internal (const address_t* address, unsigned int* same_address_found)
 {
 	unsigned int hash = Com_AddressHash (address, sv_hash_size);
 	server_t* sv;
-	qboolean (*IsSameAddress) (const struct sockaddr_storage* addr1, const struct sockaddr_storage* addr2, qboolean* same_public_address);
-	
-	if (address->ss_family == AF_INET6)
-		IsSameAddress = &Com_SameIPv6Addr;
-	else
-	{
-		assert (address->ss_family == AF_INET);
-		IsSameAddress = &Com_SameIPv4Addr;
-	}
 	sv = (server_t*)hash_table.entries[hash];
 
 	*same_address_found = 0;
@@ -173,29 +164,28 @@ static server_t* Sv_GetByAddr_Internal (const struct sockaddr_storage* address, 
 
 		if (Sv_IsActive (sv_ind))
 		{
-			const struct sockaddr_storage* sv_address = &sv->user.address;
-			if (address->ss_family == sv_address->ss_family)
+			const address_t* sv_address = &sv->user.address;
+
+			// Same address?
+			qboolean same_public_address;
+			qboolean same_address;
+
+			same_public_address = false;
+			same_address = Com_SameAddr (sv_address, address, &same_public_address);
+
+			if (same_public_address)
+				*same_address_found += 1;
+			if (same_address)
 			{
-				// Same address?
-				qboolean same_public_address;
-				qboolean same_address;
+				// Move it on top of the list (it's useful because heartbeats
+				// are almost always followed by infoResponses)
+				Com_UserHashTable_Remove (&sv->user);
+				Com_UserHashTable_Add (&hash_table, &sv->user, hash);
 
-				same_public_address = false;
-				same_address = IsSameAddress (sv_address, address, &same_public_address);
-				if (same_public_address)
-					*same_address_found += 1;
-				if (same_address)
-				{
-					// Move it on top of the list (it's useful because heartbeats
-					// are almost always followed by infoResponses)
-					Com_UserHashTable_Remove (&sv->user);
-					Com_UserHashTable_Add (&hash_table, &sv->user, hash);
-
-					return sv;
-				}
+				return sv;
 			}
 		}
-		
+
 		sv = next_sv;
 	}
 
@@ -213,7 +203,7 @@ Browse the server list and remove all the servers that have timed out
 static void Sv_CheckTimeouts (void)
 {
 	int ind;
-	
+
 	for (ind = 0; ind <= last_used_slot; ind++)
 		Sv_IsActive (ind);
 }
@@ -272,7 +262,7 @@ static qboolean Sv_ResolveIPv4Addr (const char* name, struct sockaddr_in* addr)
 	{
 		char* end_ptr;
 		unsigned short port_num;
-		
+
 		port_num = (unsigned short)strtol (port, &end_ptr, 0);
 		if (end_ptr == port || *end_ptr != '\0' || port_num == 0)
 		{
@@ -340,7 +330,7 @@ static qboolean Sv_InsertAddrmapIntoList (addrmap_t* new_map)
 				from_addr, ntohs (new_map->from.sin_port),
 				new_map->to_string,
 				inet_ntoa (new_map->to.sin_addr), ntohs (new_map->to.sin_port));
-	
+
 	return true;
 }
 
@@ -520,7 +510,7 @@ Sv_GetByAddr
 Search for a particular server in the list; add it if necessary
 ====================
 */
-server_t* Sv_GetByAddr (const struct sockaddr_storage* address, socklen_t addrlen, qboolean add_it)
+server_t* Sv_GetByAddr (const address_t* address, addr_len_t addrlen, qboolean add_it)
 {
 	unsigned int nb_same_address = 0;
 	server_t *sv;
@@ -547,12 +537,12 @@ server_t* Sv_GetByAddr (const struct sockaddr_storage* address, socklen_t addrle
 		return NULL;
 	}
 
-	if (! allow_loopback)
+	if (! allow_loopback && address->type != ADDR_TYPE_SCION)
 	{
 		// IPv4 servers on a loopback address are allowed if a mapping is defined for them
-		if (address->ss_family == AF_INET)
+		if (address->sock_addr.ss_family == AF_INET)
 		{
-			const struct sockaddr_in* addr_in = (const struct sockaddr_in*)address;
+			const struct sockaddr_in* addr_in = (const struct sockaddr_in*)&address->sock_addr;
 			addrmap = Sv_GetAddrmap (addr_in);
 			if ((ntohl (addr_in->sin_addr.s_addr) >> 24) == 127 &&
 				addrmap == NULL)
@@ -567,8 +557,8 @@ server_t* Sv_GetByAddr (const struct sockaddr_storage* address, socklen_t addrle
 		{
 			const struct sockaddr_in6 *addr_in6;
 
-			assert (address->ss_family == AF_INET6);
-			addr_in6 = (const struct sockaddr_in6*)address;
+			assert (address->sock_addr.ss_family == AF_INET6);
+			addr_in6 = (const struct sockaddr_in6*)&address->sock_addr;
 
 			if (memcmp (&addr_in6->sin6_addr.s6_addr, &in6addr_loopback.s6_addr,
 						sizeof(addr_in6->sin6_addr.s6_addr)) == 0)
@@ -662,7 +652,7 @@ server_t* Sv_GetFirst (void)
 	// Pick the start of the iteration at random
 	crt_server_ind = rand () % (last_used_slot + 1);
 
-	// Set the end of the iteration 
+	// Set the end of the iteration
 	if (crt_server_ind == 0)
 		last_server_ind = last_used_slot;
 	else
@@ -721,7 +711,7 @@ void Sv_PrintServerList (msg_level_t msg_level)
 			const char* state_string;
 
 			Com_Printf (msg_level, " * %s",
-						Sys_SockaddrToString (&sv->user.address, sv->user.addrlen));
+						Sys_AddrToString (&sv->user.address, sv->user.addrlen));
 			if (sv->addrmap != NULL)
 				Com_Printf (msg_level, ", mapped to %s",
 							sv->addrmap->to_string);
@@ -775,7 +765,7 @@ mapping must be of the form "addr1:port1=addr2:port2", ":portX" are optional
 */
 qboolean Sv_AddAddressMapping (const char* mapping)
 {
-	char *map_string, *to_ip; 
+	char *map_string, *to_ip;
 	addrmap_t* addrmap;
 
 	// Get a working copy of the mapping string
@@ -844,14 +834,14 @@ qboolean Sv_ResolveAddressMappings (void)
 	for (addrmap = addrmaps; addrmap != NULL; addrmap = addrmap->next)
 		if (!Sv_ResolveAddrmap (addrmap))
 			return false;
-	
+
 	// Build the sorted list
 	addrmap = addrmaps;
 	addrmaps = NULL;
 	while (addrmap != NULL)
 	{
 		addrmap_t* next_addrmap = addrmap->next;
-		
+
 		if (! Sv_InsertAddrmapIntoList (addrmap))
 			return false;
 

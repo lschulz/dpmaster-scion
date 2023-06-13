@@ -85,7 +85,7 @@ Cl_AddClient
 Add a client to an hash table
 ====================
 */
-static qboolean Cl_AddClient( const struct sockaddr_storage *address, socklen_t addrlen )
+static qboolean Cl_AddClient( const address_t* address, addr_len_t addrlen )
 {
 	int first_slot = ( last_used_slot + 1 ) % max_nb_clients;
 	int free_slot = first_slot;
@@ -258,7 +258,7 @@ qboolean Cl_Init( void )
 		if (! Com_UserHashTable_Init (&hash_clients, cl_hash_size, "client"))
 			return false;
 	}
-	
+
 	return true;
 }
 
@@ -270,60 +270,48 @@ Cl_BlockedByThrottle
 Return "true" if a client should be temporary ignored because he has sent too many requests recently
 ====================
 */
-qboolean Cl_BlockedByThrottle( const struct sockaddr_storage* addr, socklen_t addrlen )
+qboolean Cl_BlockedByThrottle( const address_t* addr, addr_len_t addrlen )
 {
 	unsigned int hash;
 	client_t *client;
-	qboolean (*IsSameAddress) (const struct sockaddr_storage* addr1, const struct sockaddr_storage* addr2, qboolean* same_public_address);
 
 	// If the flood protection is disabled
 	if ( !flood_protection )
 		return false;
-
-	if ( addr->ss_family == AF_INET6 )
-		IsSameAddress = &Com_SameIPv6Addr;
-	else
-	{
-		assert (addr->ss_family == AF_INET);
-		IsSameAddress = &Com_SameIPv4Addr;
-	}
 
 	// look for activity information about this client
 	hash = Com_AddressHash( addr, cl_hash_size );
 	client = (client_t*)hash_clients.entries[ hash ];
 	while ( client != NULL )
 	{
-		if ( addr->ss_family == client->user.address.ss_family )
+		qboolean same_public_address = false;
+		Com_SameAddr( addr, &client->user.address, &same_public_address );
+
+		// found entry
+		if ( same_public_address )
 		{
-			qboolean same_public_address = false;
+			msg_level_t msg_level;
+			const char* msg_result;
 
-			IsSameAddress( addr, &client->user.address, &same_public_address );
-
-			// found entry
-			if ( same_public_address )
+			int new_count = Cl_QueryThrottleDecay( client ) + 1;
+			qboolean is_blocked = ( new_count >= fp_throttle );
+			if ( ! is_blocked )
 			{
-				msg_level_t msg_level;
-				const char* msg_result;
+				client->count = new_count;
+				client->last_time = crt_time;
+				msg_level = MSG_DEBUG;
+				msg_result = "not throttled";
 
-				int new_count = Cl_QueryThrottleDecay( client ) + 1;
-				qboolean is_blocked = ( new_count >= fp_throttle );
-				if ( ! is_blocked )
-				{
-					client->count = new_count;
-					client->last_time = crt_time;
-					msg_level = MSG_DEBUG;
-					msg_result = "not throttled";
-
-				}
-				else
-				{
-					msg_level = MSG_NORMAL;
-					msg_result = "throttled";
-				}
-
-				Com_Printf( msg_level, "> Client %s: %s (new count == %d)\n", peer_address, msg_result, new_count );
-				return is_blocked;
 			}
+			else
+			{
+				msg_level = MSG_NORMAL;
+				msg_result = "throttled";
+			}
+
+			Com_Printf (msg_level, "> Client %s: %s (new count == %d)\n",
+						peer_address, msg_result, new_count);
+			return is_blocked;
 		}
 
 		client = (client_t*)client->user.next;

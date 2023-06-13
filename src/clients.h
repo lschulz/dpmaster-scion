@@ -57,7 +57,6 @@ qboolean Cl_SetFPThrottle (unsigned int throttle);
 qboolean Cl_Init( void );
 
 // Return "true" if a client should be temporary ignored because he has sent too many requests recently
-qboolean Cl_BlockedByThrottle( const struct sockaddr_storage* addr, socklen_t addrlen );
-
+qboolean Cl_BlockedByThrottle (const address_t* addr, addr_len_t addrlen);
 
 #endif  // #ifndef _CLIENTS_H_

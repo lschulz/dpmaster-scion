@@ -1,3 +1,35 @@
+This fork adds support for the SCION protocol to dpmaster.
+
+Protocol Extensions
+-------------------
+The "getserversExt" message accepts the new filter option "scion" that will
+cause dpmaster to return SCION addresses even if the request was made using
+plain IP. By default only a request sent over SCION is answered with SCION
+addresses as to maintain compatibility with non-SCION clients.
+
+The `getserversExtResponse` message returns SCION addresses as 2 bytes ISD and
+6 bytes ASN followed by the IPv4 or IPv6 address. SCION addresses with an IPv4
+host component are preceded by the characters "$\". Addresses with an IPv6 host
+component are preceded by "$/".
+
+SCION Tests
+-----------
+The script "test-scion.py" runs a basic test of the SCION support. In order to
+run the tests, first set up the "tiny" or "tiny4" topology from the SCION
+repository. Run dpmaster as
+
+$ export SCION_DAEMON_ADDRESS=127.0.0.12:30255
+$ dpmaster -v4 --allow-loopback
+
+Then run the tests:
+
+$ export SCION_DAEMON_ADDRESS=127.0.0.19:30255
+$ testsuite/test-scion.py
+
+
+--------------------------------------------------------------------------------
+                                Original Readme
+--------------------------------------------------------------------------------
 
                          Dpmaster, an open master server
                          -------------------------------

@@ -207,7 +207,7 @@ SendGetInfo
 Send a "getinfo" message to a server
 ====================
 */
-static void SendGetInfo (server_t* server, socket_t recv_socket, qboolean force_new_challenge)
+static void SendGetInfo (server_t* server, const listen_socket_t* recv_socket, qboolean force_new_challenge)
 {
 	char msg [64] = "\xFF\xFF\xFF\xFF" M2S_GETINFO " ";
 	size_t msglen;
@@ -224,9 +224,7 @@ static void SendGetInfo (server_t* server, socket_t recv_socket, qboolean force_
 	msglen = strlen (msg);
 	strncpy (msg + msglen, server->challenge, sizeof (msg) - msglen - 1);
 	msg[sizeof (msg) - 1] = '\0';
-	if (sendto (recv_socket, msg, strlen (msg), 0,
-				(const struct sockaddr*)&server->user.address,
-				server->user.addrlen) < 0)
+	if (Sys_SendTo (recv_socket, msg, strlen (msg), &server->user.address, server->user.addrlen) < 0)
 		Com_Printf (MSG_WARNING, "> WARNING: can't send getinfo (%s)\n",
 					Sys_GetLastNetErrorString ());
 	else
@@ -242,7 +240,8 @@ HandleHeartbeat
 Parse heartbeat requests
 ====================
 */
-static void HandleHeartbeat (const char* msg, const struct sockaddr_storage* addr, socklen_t addrlen, socket_t recv_socket)
+static void HandleHeartbeat (const char* msg, const address_t* addr, addr_len_t addrlen,
+							 const listen_socket_t* recv_socket)
 {
 	char tag [64];
 	const game_properties_t* game_props;
@@ -311,7 +310,8 @@ HandleGetServers
 Parse getservers requests and send the appropriate response
 ====================
 */
-static void HandleGetServers (const char* msg, const struct sockaddr_storage* addr, socklen_t addrlen, socket_t recv_socket, qboolean extended_request)
+static void HandleGetServers (const char* msg, const address_t* addr, addr_len_t addrlen,
+							  const listen_socket_t* recv_socket, qboolean extended_request)
 {
 	const char* packetheader;
 	size_t headersize;
@@ -327,8 +327,9 @@ static void HandleGetServers (const char* msg, const struct sockaddr_storage* ad
 	qboolean use_dp_protocol;
 	qboolean opt_empty = false;
 	qboolean opt_full = false;
-	qboolean opt_ipv4 = (! extended_request);
+	qboolean opt_ipv4 = (addr->type != ADDR_TYPE_SCION && ! extended_request);
 	qboolean opt_ipv6 = false;
+	qboolean opt_scion = (addr->type == ADDR_TYPE_SCION);
 	qboolean opt_gametype = false;
 	char filter_options [MAX_PACKET_SIZE_IN];
 	char* option_ptr;
@@ -377,7 +378,7 @@ static void HandleGetServers (const char* msg, const struct sockaddr_storage* ad
 		if (space)
 			*space = '\0';
 		msg_ptr = msg_ptr + strlen (gamename);
-		
+
 		game_options = Game_GetOptions (gamename);
 
 		// Read the protocol number
@@ -418,7 +419,7 @@ static void HandleGetServers (const char* msg, const struct sockaddr_storage* ad
 					request_name, peer_address, gamename);
 		return;
 	}
-	
+
 	// Apply the game options
 	if ((game_options & GAME_OPTION_SEND_EMPTY_SERVERS) != 0)
 		opt_empty = true;
@@ -473,12 +474,14 @@ static void HandleGetServers (const char* msg, const struct sockaddr_storage* ad
 				opt_ipv4 = true;
 			else if (strcmp (option_ptr, "ipv6") == 0)
 				opt_ipv6 = true;
+			else if (strcmp (option_ptr, "scion") == 0)
+				opt_scion = true;
 		}
 		option_ptr = strtok (NULL, " ");
 	}
 
 	// If no IP version was given for the filtering, accept any version
-	if (! opt_ipv4 && ! opt_ipv6)
+	if (! opt_ipv4 && ! opt_ipv6 && ! opt_scion)
 	{
 		opt_ipv4 = true;
 		opt_ipv6 = true;
@@ -504,7 +507,7 @@ static void HandleGetServers (const char* msg, const struct sockaddr_storage* ad
 		// Extra debugging info
 		if (max_msg_level >= MSG_DEBUG)
 		{
-			const char * addrstr = Sys_SockaddrToString (&sv->user.address, sv->user.addrlen);
+			const char * addrstr = Sys_AddrToString (&sv->user.address, sv->user.addrlen);
 			Com_Printf (MSG_DEBUG,
 						"  - Comparing server: IP:\"%s\", p:%d, g:\"%s\"\n",
 						addrstr, sv->protocol, sv->gamename);
@@ -520,10 +523,14 @@ static void HandleGetServers (const char* msg, const struct sockaddr_storage* ad
 				Com_Printf (MSG_DEBUG, "    Reject: no empty server allowed\n");
 			else if (! opt_full && sv->state == sv_state_full)
 				Com_Printf (MSG_DEBUG, "    Reject: no full server allowed\n");
-			else if (! opt_ipv4 && sv->user.address.ss_family == AF_INET)
+			else if (! opt_ipv4 && sv->user.address.type == ADDR_TYPE_IP &&
+					 sv->user.address.sock_addr.ss_family == AF_INET)
 				Com_Printf (MSG_DEBUG, "    Reject: no IPv4 servers allowed\n");
-			else if (! opt_ipv6 && sv->user.address.ss_family == AF_INET6)
+			else if (! opt_ipv6 && sv->user.address.type == ADDR_TYPE_IP &&
+					 sv->user.address.sock_addr.ss_family == AF_INET6)
 				Com_Printf (MSG_DEBUG, "    Reject: no IPv6 servers allowed\n");
+			else if (! opt_scion && sv->user.address.type == ADDR_TYPE_SCION)
+				Com_Printf (MSG_DEBUG, "    Reject: no SCION servers allowed\n");
 			else if (opt_gametype && strcmp (gametype, sv->gametype) != 0)
 				Com_Printf (MSG_DEBUG,
 							"    Reject: gametype \"%s\" != requested \"%s\"\n",
@@ -578,8 +585,11 @@ static void HandleGetServers (const char* msg, const struct sockaddr_storage* ad
 		// Check options, game type and game name
 		if ((! opt_empty && sv->state == sv_state_empty) ||
 			(! opt_full && sv->state == sv_state_full) ||
-			(! opt_ipv4 && sv->user.address.ss_family == AF_INET) ||
-			(! opt_ipv6 && sv->user.address.ss_family == AF_INET6) ||
+			(! opt_ipv4 && sv->user.address.type == ADDR_TYPE_IP &&
+			 sv->user.address.sock_addr.ss_family == AF_INET) ||
+			(! opt_ipv6 && sv->user.address.type == ADDR_TYPE_IP &&
+			 sv->user.address.sock_addr.ss_family == AF_INET6) ||
+			(! opt_scion && sv->user.address.type == ADDR_TYPE_SCION) ||
 			(opt_gametype && strcmp (gametype, sv->gametype) != 0) ||
 			strcmp (gamename, sv->gamename) != 0)
 		{
@@ -588,30 +598,70 @@ static void HandleGetServers (const char* msg, const struct sockaddr_storage* ad
 		}
 
 		// If the packet doesn't have enough free space for this server
-		next_sv_size = (sv->user.address.ss_family == AF_INET ? 4 : 16) + 3;
+		next_sv_size = (sv->user.address.sock_addr.ss_family == AF_INET ? 4 : 16);
+		next_sv_size += (sv->user.address.type == ADDR_TYPE_IP ? 3 : 12);
 		if (packetind + next_sv_size > sizeof (packet))
 		{
 			// Send the packet to the client
-			if (sendto (recv_socket, (void*)packet, packetind, 0,
-					(const struct sockaddr*)addr, addrlen) < 0)
+			if (Sys_SendTo (recv_socket, (void*)packet, packetind, addr, addrlen) < 0)
 				Com_Printf (MSG_WARNING, "> WARNING: can't send %s (%s)\n",
 							request_name, Sys_GetLastNetErrorString ());
 			else
 				Com_Printf (MSG_NORMAL, "> %s <--- %sResponse (%u servers)\n",
 							peer_address, request_name, nb_servers);
-			
+
 			// Reset the packet index (no need to change the header)
 			packetind = headersize;
 			nb_servers = 0;
 		}
 
-		if (sv->user.address.ss_family == AF_INET)
+		if (sv->user.address.type == ADDR_TYPE_SCION)
 		{
+			if (sv->user.address.scion_addr.ip_family == AF_INET)
+			{
+				// Heading "$\"
+				packet[packetind++] = '$';
+				packet[packetind++] = '\\';
+
+				// ISD and ASN
+				memcpy (&packet[packetind], &sv->user.address.scion_addr.ia, 8);
+				packetind += 8;
+
+				// IP address
+				memcpy (&packet[packetind], &sv->user.address.scion_addr.ipv4, 4);
+				packetind += 4;
+
+				// Port
+				packet[packetind++] = ((unsigned char*)&sv->user.address.scion_addr.port)[1];
+				packet[packetind++] = ((unsigned char*)&sv->user.address.scion_addr.port)[0];
+			}
+			else
+			{
+				// Heading "$/"
+				packet[packetind++] = '$';
+				packet[packetind++] = '/';
+
+				// ISD and ASN
+				memcpy (&packet[packetind], &sv->user.address.scion_addr.ia, 8);
+				packetind += 8;
+
+				// IP address
+				memcpy (&packet[packetind], sv->user.address.scion_addr.ipv6, 16);
+				packetind += 16;
+
+				// Port
+				packet[packetind++] = ((unsigned char*)&sv->user.address.scion_addr.port)[1];
+				packet[packetind++] = ((unsigned char*)&sv->user.address.scion_addr.port)[0];
+			}
+		}
+		else if (sv->user.address.sock_addr.ss_family == AF_INET)
+		{
+			assert (sv->user.address.type == ADDR_TYPE_IP);
 			const struct sockaddr_in* sv_sockaddr;
 			unsigned int sv_addr;
 			unsigned short sv_port;
 
-			sv_sockaddr = (const struct sockaddr_in *)&sv->user.address;
+			sv_sockaddr = (const struct sockaddr_in *)&sv->user.address.sock_addr;
 			sv_addr = ntohl (sv_sockaddr->sin_addr.s_addr);
 			sv_port = ntohs (sv_sockaddr->sin_port);
 
@@ -653,10 +703,11 @@ static void HandleGetServers (const char* msg, const struct sockaddr_storage* ad
 		}
 		else
 		{
+			assert (sv->user.address.type == ADDR_TYPE_IP);
 			const struct sockaddr_in6* sv_sockaddr6;
 			unsigned short sv_port;
 
-			sv_sockaddr6 = (const struct sockaddr_in6 *)&sv->user.address;
+			sv_sockaddr6 = (const struct sockaddr_in6 *)&sv->user.address.sock_addr;
 
 			// Heading '/'
 			packet[packetind] = '/';
@@ -681,14 +732,13 @@ static void HandleGetServers (const char* msg, const struct sockaddr_storage* ad
 	if (packetind + 7 > sizeof (packet))
 	{
 		// Send the packet to the client
-		if (sendto (recv_socket, (void*)packet, packetind, 0,
-				(const struct sockaddr*)addr, addrlen) < 0)
+		if (Sys_SendTo (recv_socket, (void*)packet, packetind, addr, addrlen) < 0)
 			Com_Printf (MSG_WARNING, "> WARNING: can't send %s (%s)\n",
 						request_name, Sys_GetLastNetErrorString ());
 		else
 			Com_Printf (MSG_NORMAL, "> %s <--- %sResponse (%u servers)\n",
 						peer_address, request_name, nb_servers);
-		
+
 		// Reset the packet index (no need to change the header)
 		packetind = headersize;
 		nb_servers = 0;
@@ -705,8 +755,7 @@ static void HandleGetServers (const char* msg, const struct sockaddr_storage* ad
 	packetind += 7;
 
 	// Send the packet to the client
-	if (sendto (recv_socket, (void*)packet, packetind, 0,
-			(const struct sockaddr*)addr, addrlen) < 0)
+	if (Sys_SendTo (recv_socket, (void*)packet, packetind, addr, addrlen) < 0)
 		Com_Printf (MSG_WARNING, "> WARNING: can't send %s (%s)\n",
 					request_name, Sys_GetLastNetErrorString ());
 	else
@@ -818,7 +867,7 @@ static void HandleInfoResponse (server_t* server, const char* msg)
 						peer_address);
 			return;
 		}
-		
+
 		value = server->hb_properties->name;
 	}
 	// ... but if it did, it must match the one its heartbeat advertized (if any)
@@ -848,7 +897,7 @@ static void HandleInfoResponse (server_t* server, const char* msg)
 					peer_address);
 		return;
 	}
-	
+
 	if (! Game_IsAccepted (value))
 	{
 		Com_Printf (MSG_WARNING,
@@ -884,9 +933,9 @@ Parse a packet to figure out what to do with it
 ====================
 */
 void HandleMessage (const char* msg, size_t length,
-					const struct sockaddr_storage* address,
-					socklen_t addrlen,
-					socket_t recv_socket)
+					const address_t* address,
+					addr_len_t addrlen,
+					const listen_socket_t* recv_socket)
 {
 	// If it's an heartbeat
 	if (!strncmp (S2M_HEARTBEAT, msg, strlen (S2M_HEARTBEAT)))
@@ -901,7 +950,7 @@ void HandleMessage (const char* msg, size_t length,
 		server_t* server;
 
 		Com_Printf (MSG_NORMAL, "> %s ---> infoResponse\n", peer_address);
-	
+
 		server = Sv_GetByAddr (address, addrlen, false);
 		if (server == NULL)
 		{

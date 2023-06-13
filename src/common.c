@@ -59,6 +59,9 @@ qboolean print_date = false;
 // Are port numbers used when computing address hashes?
 qboolean hash_ports = false;
 
+// Set in signal handler when the server should exit
+volatile sig_atomic_t exit_event = -1;
+
 
 // ---------- Private functions ---------- //
 
@@ -285,7 +288,7 @@ void Com_UserHashTable_Remove (user_t* user)
 {
 	*user->prev_ptr = user->next;
 	if (user->next != NULL)
-		user->next->prev_ptr = user->prev_ptr;	
+		user->next->prev_ptr = user->prev_ptr;
 }
 
 
@@ -349,6 +352,14 @@ void Com_SignalHandler (int Signal)
 {
 	switch (Signal)
 	{
+		case SIGINT:
+		case SIGTERM:
+		{
+			uint64_t value = 1;
+			if (write(exit_event, &value, sizeof(value)) < 0)
+				raise(SIGKILL);
+			break;
+		}
 #ifdef SIGUSR1
 		case SIGUSR1:
 			must_open_log = true;
@@ -374,23 +385,42 @@ Com_AddressHash
 Compute the hash of a server address
 ====================
 */
-unsigned int Com_AddressHash (const struct sockaddr_storage* address, size_t hash_size)
+unsigned int Com_AddressHash (const address_t* address, size_t hash_size)
 {
-	unsigned int hash;
+	unsigned int hash = 0;
 
-	if (address->ss_family == AF_INET6)
+	if (address->type == ADDR_TYPE_SCION)
+	{
+		hash ^= (uint32_t)(address->scion_addr.ia);
+		hash ^= (uint32_t)(address->scion_addr.ia >> 32);
+
+		if (address->scion_addr.ip_family == AF_INET)
+			hash ^= address->scion_addr.ipv4;
+		else
+		{
+			assert(address->scion_addr.ip_family == AF_INET6);
+			for (int i = 0; i < 4; ++i)
+				hash ^= address->scion_addr.ipv6[i];
+		}
+
+		if (hash_ports)
+			hash ^= address->scion_addr.port;
+	}
+	else if (address->sock_addr.ss_family == AF_INET6)
 	{
 		const struct sockaddr_in6* addr6;
 		const unsigned int* ipv6_ptr;
 
+		assert(address->type == ADDR_TYPE_IP);
+
 		addr6 = (const struct sockaddr_in6*)address;
 		ipv6_ptr = (const unsigned int*)&addr6->sin6_addr.s6_addr;
-		
+
 		// Since an IPv6 device can have multiple addresses, we only hash
 		// the non-configurable part of its public address (meaning the first
 		// 64 bits, or subnet part)
 		hash = ipv6_ptr[0] ^ ipv6_ptr[1];
-		
+
 		if (hash_ports)
 			hash ^= addr6->sin6_port;
 	}
@@ -398,23 +428,78 @@ unsigned int Com_AddressHash (const struct sockaddr_storage* address, size_t has
 	{
 		const struct sockaddr_in* addr4;
 
-		assert(address->ss_family == AF_INET);
+		assert(address->type == ADDR_TYPE_IP);
+		assert(address->sock_addr.ss_family == AF_INET);
 
 		addr4 = (const struct sockaddr_in*)address;
 		hash = addr4->sin_addr.s_addr;
-		
+
 		if (hash_ports)
 			hash ^= addr4->sin_port;
 	}
 
 	// Merge all the bits in the first 16 bits
 	hash = (hash & 0xFFFF) ^ (hash >> 16);
-	
+
 	// Merge the bits we won't use in the upper part into the lower part.
 	// If hash_size < 8, some bits will be lost, but it's not a real problem
 	hash = (hash ^ (hash >> hash_size)) & ((1 << hash_size) - 1);
 
 	return hash;
+}
+
+
+/*
+====================
+Com_SameAddr
+
+Compare 2 addresses and return "true" if they're equal
+====================
+*/
+qboolean Com_SameAddr (const address_t* addr1,
+					   const address_t* addr2,
+					   qboolean* same_public_address)
+{
+	*same_public_address = false;
+	if (addr1->type == ADDR_TYPE_SCION)
+	{
+		if (addr2->type != ADDR_TYPE_SCION)
+			return false;
+		if (addr1->scion_addr.ip_family != addr2->scion_addr.ip_family)
+			return false;
+		if (addr1->scion_addr.ia != addr2->scion_addr.ia)
+			return false;
+		if (addr1->scion_addr.ip_family == AF_INET)
+		{
+			if (addr1->scion_addr.ipv4 == addr2->scion_addr.ipv4)
+			{
+				*same_public_address = true;
+				return addr1->scion_addr.port == addr2->scion_addr.port;
+			}
+			return false;
+		}
+		else
+		{
+			assert (addr1->scion_addr.ip_family == AF_INET);
+			if (memcmp (addr1->scion_addr.ipv6, addr2->scion_addr.ipv6, 16) == 0)
+			{
+				*same_public_address = true;
+				return addr1->scion_addr.port == addr2->scion_addr.port;
+			}
+			return false;
+		}
+	}
+	else
+	{
+		if (addr2->type != ADDR_TYPE_IP)
+			return false;
+		if (addr1->sock_addr.ss_family != addr2->sock_addr.ss_family)
+			return false;
+		if (addr1->sock_addr.ss_family == AF_INET)
+			return Com_SameIPv4Addr (&addr1->sock_addr, &addr2->sock_addr, same_public_address);
+		else
+			return Com_SameIPv6Addr (&addr1->sock_addr, &addr2->sock_addr, same_public_address);
+	}
 }
 
 
