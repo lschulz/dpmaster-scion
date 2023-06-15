@@ -980,6 +980,12 @@ int main (int argc, const char* argv [])
 	// Get the options from the command line
 	valid_options = ParseCommandLine (argc, argv);
 
+	if (daemon_state == DAEMON_STATE_REQUEST)
+	{
+		Com_Printf (MSG_ERROR, "The daemon option is not supported.\n");
+		return EXIT_FAILURE;
+	}
+
 	PrintBanner();
 
 	// If something goes wrong with the command line, exit

@@ -1,5 +1,12 @@
 This fork adds support for the SCION protocol to dpmaster.
 
+Listening on SCION Addresses
+----------------------------
+The "--listen" option accepts SCION addresses in the form ISD-AS,IP:Port. If no
+listen addresses are specified, dpmaster will listen on all interfaces. Since
+SCION does not support wildcard addresses, SCION picks a default local address
+(usually 127.0.0.1).
+
 Protocol Extensions
 -------------------
 The "getserversExt" message accepts the new filter option "scion" that will
@@ -25,6 +32,13 @@ Then run the tests:
 
 $ export SCION_DAEMON_ADDRESS=127.0.0.19:30255
 $ testsuite/test-scion.py
+
+Known Issues
+------------
+Daemonizing dpmaster with the "--daemon" option corrupts the state of the
+program, therefore the daemon option is disabled. If you want do run dpmaster as
+a daemon, use the "daemonize" command instead.
+See https://github.com/golang/go/issues/31860 for an explanation.
 
 
 --------------------------------------------------------------------------------
