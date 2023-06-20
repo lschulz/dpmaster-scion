@@ -467,7 +467,7 @@ static qboolean Sys_CreateScionListenSocket (listen_socket_t* listen_sock,
 	char local_addr[128] = {0};
 	char unix_addr[MAX_UNIX_SOCK_ADDR_LEN] = {0};
 
-	if (listen_sock->scion_local_addr == NULL)
+	if (listen_sock->local_addr_name == NULL)
 	{
 		// Since binding to wildcard addresses is not supported in SCION at the
 		// moment, this will bind to a default local IP (most likely localhost).
@@ -475,9 +475,9 @@ static qboolean Sys_CreateScionListenSocket (listen_socket_t* listen_sock,
 	}
 	else
 	{
-		if (! Sys_SetAddrMasterPort (listen_sock->scion_local_addr, local_addr, sizeof(local_addr)))
+		if (! Sys_SetAddrMasterPort (listen_sock->local_addr_name, local_addr, sizeof(local_addr)))
 		{
-			Com_Printf (MSG_ERROR, "> ERROR: invalid address %s\n", listen_sock->scion_local_addr);
+			Com_Printf (MSG_ERROR, "> ERROR: invalid address %s\n", listen_sock->local_addr_name);
 			return false;
 		}
 	}

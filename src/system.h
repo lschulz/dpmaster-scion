@@ -82,11 +82,10 @@ typedef struct
 {
 	socket_t socket;                    // socket FD
 	socklen_t local_addr_len;           // length of local_addr
-	const char* local_addr_name;        // raw address from command line
+	const char* local_addr_name;        // address from command line
 	struct sockaddr_storage local_addr; // local address socket is bound to
 	qboolean optional;                  // don't fail if listening on the socket fails
 	qboolean is_scion;                  // is a SCION listen connection, socket is a unix socket
-	const char* scion_local_addr;       // local UDP listen address for PAN conn
 	PanListenConn conn;                 // PAN connection
 	PanListenSockAdapter adapter;       // unix socket adapter
 } listen_socket_t;
