@@ -64,9 +64,6 @@
 // Maximum address hash size in bits
 #define MAX_HASH_SIZE 16
 
-// TODO
-#define SCION
-
 // ---------- Types ---------- //
 
 // A few basic types
