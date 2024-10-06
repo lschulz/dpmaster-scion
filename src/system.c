@@ -312,6 +312,7 @@ does not guaranteed the address is valid.
 ====================
 */
 qboolean Sys_SetAddrMasterPort(const char* restrict addr_in,
+							   unsigned short master_port,
 							   char* restrict addr_out,
 							   size_t addr_out_len)
 {
@@ -471,11 +472,15 @@ static qboolean Sys_CreateScionListenSocket (listen_socket_t* listen_sock,
 	{
 		// Since binding to wildcard addresses is not supported in SCION at the
 		// moment, this will bind to a default local IP (most likely localhost).
-		snprintf(local_addr, sizeof(local_addr), "0.0.0.0:%d", master_port);
+		// SCION must bind to a different port (master_port + 1) to avoid a
+		// collision with the regular IP socket.
+		snprintf(local_addr, sizeof(local_addr), "0.0.0.0:%d", master_port + 1);
 	}
 	else
 	{
-		if (! Sys_SetAddrMasterPort (listen_sock->local_addr_name, local_addr, sizeof(local_addr)))
+		unsigned short port = master_port;
+		if (listen_sock->is_scion) port++;
+		if (! Sys_SetAddrMasterPort (listen_sock->local_addr_name, port, local_addr, sizeof(local_addr)))
 		{
 			Com_Printf (MSG_ERROR, "> ERROR: invalid address %s\n", listen_sock->local_addr_name);
 			return false;
@@ -488,8 +493,10 @@ static qboolean Sys_CreateScionListenSocket (listen_socket_t* listen_sock,
 	{
 		if (err == PAN_ERR_ADDR_SYNTAX)
 			Com_Printf (MSG_ERROR, "> ERROR: invalid address %s\n", local_addr);
-		else if (err == PAN_ERR_FAILED)
+		else if (err == PAN_ERR_FAILED) {
 			Com_Printf (MSG_ERROR, "> ERROR: PAN socket binding to %s failed\n", local_addr);
+			Com_Printf (MSG_ERROR, "> %s\n", PanGetLastError());
+		}
 		return false;
 	}
 	else
@@ -597,7 +604,7 @@ Sys_DeclareListenAddress
 Step 1 - Add a listen socket to the listening socket list
 ====================
 */
-qboolean Sys_DeclareListenAddress (const char* local_addr_name)
+qboolean Sys_DeclareListenAddress (const char* local_addr_name, qboolean scion)
 {
 	if (nb_sockets < MAX_LISTEN_SOCKETS)
 	{
@@ -606,14 +613,7 @@ qboolean Sys_DeclareListenAddress (const char* local_addr_name)
 		memset (listen_sock, 0, sizeof (*listen_sock));
 		listen_sock->socket = INVALID_SOCKET;
 		listen_sock->local_addr_name = local_addr_name;
-
-		// Check if the address looks like a SCION address (ISD-ASN,IP)
-		const char* comma = strchr (local_addr_name, ',');
-		if (comma && comma[1] != '\0')
-		{
-			listen_sock->is_scion = true;
-			listen_sock->local_addr_name = &comma[1];
-		}
+		listen_sock->is_scion = scion;
 
 		nb_sockets++;
 		return true;
@@ -1118,7 +1118,7 @@ ssize_t Sys_SendTo(const listen_socket_t *sock, const void *restrict buf, size_t
 
 	// Send SCION packet
 	if (len > 2048) len = 2048;
-	char packet [PAN_ADDR_HDR_SIZE + len];
+	char packet [PAN_ADDR_HDR_SIZE + PAN_CTX_HDR_SIZE + len];
 
 	// Write proxy header
 	assert (to->type == ADDR_TYPE_SCION);
@@ -1136,10 +1136,11 @@ ssize_t Sys_SendTo(const listen_socket_t *sock, const void *restrict buf, size_t
 			*(uint32_t*)&packet[12 + 4*i] = to->scion_addr.ipv6[i];
 	}
 	*(uint16_t*)&packet[28] = to->scion_addr.port;
+	*(uint64_t*)&packet[32] = 0; // path selector context
 
-	memcpy (packet + PAN_ADDR_HDR_SIZE, buf, len);
+	memcpy (packet + PAN_ADDR_HDR_SIZE + PAN_CTX_HDR_SIZE, buf, len);
 
-	ssize_t bytes = send (sock->socket, packet, PAN_ADDR_HDR_SIZE + len, 0);
+	ssize_t bytes = send (sock->socket, packet, PAN_ADDR_HDR_SIZE + PAN_CTX_HDR_SIZE + len, 0);
 	if (bytes < PAN_ADDR_HDR_SIZE)
 		return -1;
 

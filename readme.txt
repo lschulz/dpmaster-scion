@@ -2,10 +2,12 @@ This fork adds support for the SCION protocol to dpmaster.
 
 Listening on SCION Addresses
 ----------------------------
-The "--listen" option accepts SCION addresses in the form ISD-AS,IP:Port. If no
-listen addresses are specified, dpmaster will listen on all interfaces. Since
+The "-s/--listen-scion" option adds local IP addresses (and ports) to listen on
+with SCION. If neither IP (-l/--listen) nor SCION (-s/--listen-scion) addresses
+are specified, dpmaster will listen on all interfaces including SCION. Since
 SCION does not support wildcard addresses, SCION picks a default local address
-(usually 127.0.0.1).
+(usually 127.0.0.1). To avoid a port collision between IP and SCION sockets, the
+default port for SCION is one above the normal default port.
 
 Protocol Extensions
 -------------------

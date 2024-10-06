@@ -4,14 +4,9 @@ import socket
 import time
 import unittest
 from ipaddress import IPv4Address, IPv6Address
-from typing import List, Mapping, NamedTuple, Optional, Tuple
+from typing import List, Mapping, Optional, Tuple
 
 from pan import udp
-
-
-class IA(NamedTuple):
-    isd: int
-    asn: int
 
 
 class BaseTest(unittest.TestCase):
@@ -69,7 +64,7 @@ class BaseTest(unittest.TestCase):
                     servers.append((None, ip, port))
                 srv_list = srv_list[7:]
 
-    def expect_getservers_ext_response(self) -> List[Tuple[Optional[IA], IPv4Address|IPv6Address, int]]:
+    def expect_getservers_ext_response(self) -> List[Tuple[Optional[int], IPv4Address|IPv6Address, int]]:
         """Expect getserversResponseExt packets from the master server."""
         header = b"\xff\xff\xff\xffgetserversExtResponse"
         servers = []
@@ -97,16 +92,14 @@ class BaseTest(unittest.TestCase):
                 elif srv_list[0] == ord(b"$"):
                     if srv_list[1] == ord(b"\\"):
                         # SCION + IPv4
-                        ia = IA(int.from_bytes(srv_list[2:4], 'big'),
-                                int.from_bytes(srv_list[4:10], 'big'))
+                        ia = int.from_bytes(srv_list[2:10], 'big')
                         ip = IPv4Address(srv_list[10:14])
                         port = int.from_bytes(srv_list[14:16], 'big')
                         servers.append((ia, ip, port))
                         srv_list = srv_list[16:]
                     elif srv_list[1] == ord(b"/"):
                         # SCION + IPv6
-                        ia = IA(int.from_bytes(srv_list[2:4], 'big'),
-                                int.from_bytes(srv_list[4:10], 'big'))
+                        ia = int.from_bytes(srv_list[2:10], 'big')
                         ip = IPv6Address(srv_list[10:26])
                         port = int.from_bytes(srv_list[26:28], 'big')
                         servers.append((ia, ip, port))
@@ -163,15 +156,15 @@ class ScionConn:
     """Test using a SCION connection"""
 
     def setUp(self):
-        remote = udp.resolveUDPAddr("1-ff00:0:110,127.0.0.1:27950")
+        remote = udp.resolveUDPAddr("1-ff00:0:110,127.0.0.1:27951")
         self.__conn = udp.Conn(remote)
 
     def tearDown(self):
         self.__conn.close()
 
-    def get_local(self) -> Tuple[IA, IPv4Address|IPv6Address, int]:
+    def get_local(self) -> Tuple[int, IPv4Address|IPv6Address, int]:
         local = self.__conn.local()
-        return IA(*local.get_ia()), local.get_ip(), local.get_port()
+        return local.get_ia(), local.get_ip(), local.get_port()
 
     def write(self, msg: bytes) -> int:
         return self.__conn.write(msg)

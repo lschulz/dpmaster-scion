@@ -121,7 +121,7 @@ extern daemon_state_t daemon_state;
 void Sys_CloseAllSockets (void);
 
 // Step 1 - Add a listen socket to the listening socket list
-qboolean Sys_DeclareListenAddress (const char* local_addr_name);
+qboolean Sys_DeclareListenAddress (const char* local_addr_name, qboolean scion);
 
 // Step 2 - Resolve the address names of all the listening sockets
 qboolean Sys_ResolveListenAddresses (void);

@@ -149,6 +149,16 @@ static const cmdlineopt_t cmdline_options [] =
 		1
 	},
 	{
+		"listen-scion",
+		"<address>",
+		"Listen on local address <address> with SCION\n"
+		"   You can listen on up to %d addresses",
+		{ MAX_LISTEN_SOCKETS, 0 },
+		's',
+		1,
+		1
+	},
+	{
 		"log",
 		NULL,
 		"Enable the logging to disk",
@@ -423,7 +433,7 @@ static cmdline_status_t Cmdline_Option (const cmdlineopt_t* opt, const char** pa
 			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
 	}
 
-	// Listen address
+	// Listen address (IP)
 	else if (strcmp (opt_name, "listen") == 0)
 	{
 		const char* param;
@@ -432,7 +442,20 @@ static cmdline_status_t Cmdline_Option (const cmdlineopt_t* opt, const char** pa
 		if (param[0] == '\0')
 			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
 
-		if (! Sys_DeclareListenAddress (param))
+		if (! Sys_DeclareListenAddress (param, false))
+			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
+	}
+
+	// Listen address (SCION)
+	else if (strcmp (opt_name, "listen-scion") == 0)
+	{
+		const char* param;
+
+		param = params[0];
+		if (param[0] == '\0')
+			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
+
+		if (! Sys_DeclareListenAddress (param, true))
 			return CMDLINE_STATUS_INVALID_OPT_PARAMS;
 	}
 
